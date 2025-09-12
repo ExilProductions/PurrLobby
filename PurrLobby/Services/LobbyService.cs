@@ -17,6 +17,7 @@ public interface ILobbyService
     Task<List<LobbyUser>> GetLobbyMembersAsync(Guid gameId, string lobbyId, CancellationToken ct = default);
     Task<bool> SetAllReadyAsync(Guid gameId, string lobbyId, CancellationToken ct = default);
     Task<bool> SetLobbyStartedAsync(Guid gameId, string lobbyId, CancellationToken ct = default);
+    Task<Lobby?> GetLobbyAsync(Guid gameId, string lobbyId, string currentUserId, CancellationToken ct = default);
 
     // stats
     Task<int> GetGlobalPlayerCountAsync(CancellationToken ct = default);
@@ -361,6 +362,17 @@ public class LobbyService : ILobbyService
         state.Started = true;
         _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "lobby_started" }, ct);
         return Task.FromResult(true);
+    }
+
+    public Task<Lobby?> GetLobbyAsync(Guid gameId, string lobbyId, string currentUserId, CancellationToken ct = default)
+    {
+        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(currentUserId))
+            return Task.FromResult<Lobby?>(null);
+        if (!_lobbies.TryGetValue(lobbyId, out var state))
+            return Task.FromResult<Lobby?>(null);
+        if (state.GameId != gameId)
+            return Task.FromResult<Lobby?>(null);
+        return Task.FromResult<Lobby?>(Project(state, currentUserId));
     }
 
     public Task<int> GetGlobalPlayerCountAsync(CancellationToken ct = default)
