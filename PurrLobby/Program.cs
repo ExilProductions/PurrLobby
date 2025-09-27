@@ -86,6 +86,7 @@ builder.Services.AddSwaggerGen(o =>
 });
 builder.Services.AddSingleton<ILobbyEventHub, LobbyEventHub>();
 builder.Services.AddSingleton<ILobbyService, LobbyService>();
+builder.Services.AddRazorPages(); // Register Razor Pages services
 var app = builder.Build();
 if (!app.Environment.IsDevelopment())
 {
@@ -102,10 +103,10 @@ app.UseResponseCompression();
 app.UseHttpLogging();
 app.UseRateLimiter();
 app.UseWebSockets();
-app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseSwagger();
 app.UseSwaggerUI();
+app.MapRazorPages(); // Enable Razor Pages
 static CookieOptions BuildStdCookieOptions() => new()
 {
     HttpOnly = true,

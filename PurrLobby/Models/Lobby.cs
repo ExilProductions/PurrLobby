@@ -5,6 +5,7 @@ public class LobbyUser
 {
     public required string Id { get; init; }
     public required string DisplayName { get; init; }
+    public int userPing { get; set; }
     public bool IsReady { get; set; }
 }
 
