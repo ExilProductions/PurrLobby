@@ -20,7 +20,7 @@ services:
       - "--entryPoints.web.http.redirections.entryPoint.scheme=https"
 
       # Let's Encrypt ACME
-      - "--certificatesresolvers.le.acme.email=YOUR_EMAIL@example.com" # replace with your email
+      - "--certificatesresolvers.le.acme.email=exil@exil.dev"
       - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
       - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
 
