@@ -3,7 +3,8 @@ namespace PurrLobby.Models;
 // user in lobby
 public class LobbyUser
 {
-    public required string Id { get; init; }
+    public required string SessionToken { get; init; }
+    public required string UserId { get; init; }
     public required string DisplayName { get; init; }
     public int userPing { get; set; }
     public bool IsReady { get; set; }

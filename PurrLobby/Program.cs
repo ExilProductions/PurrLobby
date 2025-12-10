@@ -1,4 +1,4 @@
-﻿using System.Threading.RateLimiting;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.HttpLogging;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -84,6 +84,7 @@ builder.Services.AddSwaggerGen(o =>
         }
     });
 });
+builder.Services.AddSingleton<IAuthenticationService, AuthenticationService>();
 builder.Services.AddSingleton<ILobbyEventHub, LobbyEventHub>();
 builder.Services.AddSingleton<ILobbyService, LobbyService>();
 builder.Services.AddRazorPages(); // Register Razor Pages services
@@ -92,16 +93,17 @@ if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler();
     app.UseHsts();
+    app.UseHttpsRedirection();
 }
 else
 {
     app.UseDeveloperExceptionPage();
 }
-app.UseHttpsRedirection();
 app.UseForwardedHeaders();
 app.UseResponseCompression();
 app.UseHttpLogging();
 app.UseRateLimiter();
+app.UseAuthentication();
 app.UseWebSockets();
 app.UseStaticFiles();
 app.UseSwagger();
@@ -167,14 +169,7 @@ static bool TryGetGameIdFromCookie(HttpRequest request, out Guid gameId)
     return Guid.TryParse(v, out gameId);
 }
 
-static string EnsureUserIdCookie(HttpContext http)
-{
-    if (http.Request.Cookies.TryGetValue("userId", out var v) && !string.IsNullOrWhiteSpace(v))
-        return v;
-    var newId = Guid.NewGuid().ToString("N");
-    http.Response.Cookies.Append("userId", newId, BuildStdCookieOptions());
-    return newId;
-}
+
 
 // create lobby
 app.MapPost("/lobbies", async (HttpContext http, ILobbyService service, CreateLobbyRequest req, CancellationToken ct) =>
@@ -182,16 +177,23 @@ app.MapPost("/lobbies", async (HttpContext http, ILobbyService service, CreateLo
     if (!TryGetGameIdFromCookie(http.Request, out var gameId))
         return Results.BadRequest("Missing or invalid gameId cookie");
     if (req.MaxPlayers <= 0) return Results.BadRequest("MaxPlayers must be > 0");
-    if (string.IsNullOrWhiteSpace(req.OwnerDisplayName)) return Results.BadRequest("OwnerDisplayName required");
+    
+    var user = http.Items["User"] as AuthenticatedUser;
+    if (user == null)
+        return Results.Unauthorized();
+        
     try
     {
-        var ownerUserId = EnsureUserIdCookie(http);
-        var lobby = await service.CreateLobbyAsync(gameId, ownerUserId, req.OwnerDisplayName, req.MaxPlayers, req.Properties, ct);
+        var lobby = await service.CreateLobbyAsync(gameId, user.SessionToken, req.MaxPlayers, req.Properties, ct);
         return Results.Ok(lobby);
     }
     catch (ArgumentException ax)
     {
         return Results.BadRequest(ax.Message);
+    }
+    catch (UnauthorizedAccessException)
+    {
+        return Results.Unauthorized();
     }
 })
 .WithTags("Lobbies")
@@ -207,13 +209,16 @@ app.MapPost("/lobbies", async (HttpContext http, ILobbyService service, CreateLo
 .ProducesProblem(StatusCodes.Status400BadRequest);
 
 // join lobby
-app.MapPost("/lobbies/{lobbyId}/join", async (HttpContext http, ILobbyService service, string lobbyId, JoinLobbyRequest req, CancellationToken ct) =>
+app.MapPost("/lobbies/{lobbyId}/join", async (HttpContext http, ILobbyService service, string lobbyId, CancellationToken ct) =>
 {
     if (!TryGetGameIdFromCookie(http.Request, out var gameId))
         return Results.BadRequest("Missing or invalid gameId cookie");
-    if (string.IsNullOrWhiteSpace(req.DisplayName)) return Results.BadRequest("DisplayName required");
-    var userId = EnsureUserIdCookie(http);
-    var lobby = await service.JoinLobbyAsync(gameId, lobbyId, userId, req.DisplayName, ct);
+        
+    var user = http.Items["User"] as AuthenticatedUser;
+    if (user == null)
+        return Results.Unauthorized();
+        
+    var lobby = await service.JoinLobbyAsync(gameId, lobbyId, user.SessionToken, ct);
     return lobby is null ? Results.NotFound() : Results.Ok(lobby);
 }).WithTags("Lobbies")
 .WithOpenApi(op =>
@@ -222,7 +227,7 @@ app.MapPost("/lobbies/{lobbyId}/join", async (HttpContext http, ILobbyService se
     op.Description = "Adds the current cookie user (server generated userId) to the specified lobby.";
     return op;
 })
-.Accepts<JoinLobbyRequest>("application/json")
+
 .Produces<Lobby>(StatusCodes.Status200OK)
 .Produces(StatusCodes.Status404NotFound)
 .Produces(StatusCodes.Status400BadRequest)
@@ -233,8 +238,12 @@ app.MapPost("/lobbies/{lobbyId}/leave", async (HttpContext http, ILobbyService s
 {
     if (!TryGetGameIdFromCookie(http.Request, out var gameId))
         return Results.BadRequest("Missing or invalid gameId cookie");
-    var userId = EnsureUserIdCookie(http);
-    var ok = await service.LeaveLobbyAsync(gameId, lobbyId, userId, ct);
+        
+    var user = http.Items["User"] as AuthenticatedUser;
+    if (user == null)
+        return Results.Unauthorized();
+        
+    var ok = await service.LeaveLobbyAsync(gameId, lobbyId, user.SessionToken, ct);
     return ok ? Results.Ok() : Results.NotFound();
 }).WithTags("Lobbies")
 .WithOpenApi(op =>
@@ -248,24 +257,7 @@ app.MapPost("/lobbies/{lobbyId}/leave", async (HttpContext http, ILobbyService s
 .Produces(StatusCodes.Status400BadRequest)
 .ProducesProblem(StatusCodes.Status400BadRequest);
 
-// leave any lobby by user id
-app.MapPost("/users/{userId}/leave", async (HttpContext http, ILobbyService service, string userId, CancellationToken ct) =>
-{
-    if (!TryGetGameIdFromCookie(http.Request, out var gameId))
-        return Results.BadRequest("Missing or invalid gameId cookie");
-    var ok = await service.LeaveLobbyAsync(gameId, userId, ct);
-    return ok ? Results.Ok() : Results.NotFound();
-}).WithTags("Lobbies")
-.WithOpenApi(op =>
-{
-    op.Summary = "Force a user to leave their lobby";
-    op.Description = "Removes the specified user from whichever lobby they are currently in for the current game.";
-    return op;
-})
-.Produces(StatusCodes.Status200OK)
-.Produces(StatusCodes.Status404NotFound)
-.Produces(StatusCodes.Status400BadRequest)
-.ProducesProblem(StatusCodes.Status400BadRequest);
+
 
 // search lobbies
 app.MapGet("/lobbies/search", async (HttpContext http, ILobbyService service, int maxRoomsToFind = 10, CancellationToken ct = default) =>
@@ -299,8 +291,12 @@ app.MapGet("/lobbies/{lobbyId}", async (HttpContext http, ILobbyService service,
 {
     if (!TryGetGameIdFromCookie(http.Request, out var gameId))
         return Results.BadRequest("Missing or invalid gameId cookie");
-    var userId = EnsureUserIdCookie(http);
-    var lobby = await service.GetLobbyAsync(gameId, lobbyId, userId, ct);
+        
+    var user = http.Items["User"] as AuthenticatedUser;
+    if (user == null)
+        return Results.Unauthorized();
+        
+    var lobby = await service.GetLobbyAsync(gameId, lobbyId, user.SessionToken, ct);
     return lobby is null ? Results.NotFound() : Results.Ok(lobby);
 })
 .WithTags("Lobbies")
@@ -360,7 +356,12 @@ app.MapPost("/lobbies/{lobbyId}/data", async (HttpContext http, ILobbyService se
     if (!TryGetGameIdFromCookie(http.Request, out var gameId))
         return Results.BadRequest("Missing or invalid gameId cookie");
     if (string.IsNullOrWhiteSpace(req.Key)) return Results.BadRequest("Key is required");
-    var ok = await service.SetLobbyDataAsync(gameId, lobbyId, req.Key, req.Value, ct);
+        
+    var user = http.Items["User"] as AuthenticatedUser;
+    if (user == null)
+        return Results.Unauthorized();
+        
+    var ok = await service.SetLobbyDataAsync(gameId, lobbyId, user.SessionToken, req.Key, req.Value, ct);
     return ok ? Results.Ok() : Results.NotFound();
 })
 .WithTags("Lobbies")
@@ -381,8 +382,12 @@ app.MapPost("/lobbies/{lobbyId}/ready", async (HttpContext http, ILobbyService s
 {
     if (!TryGetGameIdFromCookie(http.Request, out var gameId))
         return Results.BadRequest("Missing or invalid gameId cookie");
-    if (string.IsNullOrWhiteSpace(req.UserId)) return Results.BadRequest("UserId required");
-    var ok = await service.SetIsReadyAsync(gameId, lobbyId, req.UserId, req.IsReady, ct);
+        
+    var user = http.Items["User"] as AuthenticatedUser;
+    if (user == null)
+        return Results.Unauthorized();
+        
+    var ok = await service.SetIsReadyAsync(gameId, lobbyId, user.SessionToken, req.IsReady, ct);
     return ok ? Results.Ok() : Results.NotFound();
 })
 .WithTags("Lobbies")
@@ -398,42 +403,18 @@ app.MapPost("/lobbies/{lobbyId}/ready", async (HttpContext http, ILobbyService s
 .Produces(StatusCodes.Status400BadRequest)
 .ProducesProblem(StatusCodes.Status400BadRequest);
 
-// set all ready
-app.MapPost("/lobbies/{lobbyId}/ready/all", async (HttpContext http, ILobbyService service, string lobbyId, AllReadyRequest req, CancellationToken ct) =>
-{
-    if (!TryGetGameIdFromCookie(http.Request, out var gameId))
-        return Results.BadRequest("Missing or invalid gameId cookie");
-    if (string.IsNullOrWhiteSpace(req.UserId)) return Results.BadRequest("UserId required");
-    var lobby = await service.GetLobbyAsync(gameId, lobbyId, req.UserId, ct);
-    if (lobby is null) return Results.NotFound();
-    if (!lobby.IsOwner) return Results.StatusCode(StatusCodes.Status403Forbidden);
-    var ok = await service.SetAllReadyAsync(gameId, lobbyId, ct);
-    return ok ? Results.Ok() : Results.BadRequest();
-})
-.WithTags("Lobbies")
-.WithOpenApi(op =>
-{
-    op.Summary = "Mark all members ready";
-    op.Description = "Owner only. Sets all members' ready state to true and broadcasts all_ready. Requires userId in body identifying the acting owner.";
-    return op;
-})
-.Accepts<AllReadyRequest>("application/json")
-.Produces(StatusCodes.Status200OK)
-.Produces(StatusCodes.Status403Forbidden)
-.Produces(StatusCodes.Status404NotFound)
-.Produces(StatusCodes.Status400BadRequest);
-
 // start lobby
 app.MapPost("/lobbies/{lobbyId}/start", async (HttpContext http, ILobbyService service, string lobbyId, CancellationToken ct) =>
 {
     if (!TryGetGameIdFromCookie(http.Request, out var gameId))
         return Results.BadRequest("Missing or invalid gameId cookie");
-    var userId = EnsureUserIdCookie(http);
-    var lobby = await service.GetLobbyAsync(gameId, lobbyId, userId, ct);
-    if (lobby is null) return Results.NotFound();
-    if (!lobby.IsOwner) return Results.StatusCode(StatusCodes.Status403Forbidden);
-    var ok = await service.SetLobbyStartedAsync(gameId, lobbyId, ct);
-    return ok ? Results.Ok() : Results.BadRequest();
+        
+    var user = http.Items["User"] as AuthenticatedUser;
+    if (user == null)
+        return Results.Unauthorized();
+        
+    var ok = await service.SetLobbyStartedAsync(gameId, lobbyId, user.SessionToken, ct);
+    return ok ? Results.Ok() : Results.NotFound();
 })
 .WithTags("Lobbies")
 .WithOpenApi(op =>
@@ -456,15 +437,17 @@ app.Map("/ws/lobbies/{lobbyId}", async (HttpContext http, string lobbyId, ILobby
     if (!TryGetGameIdFromCookie(http.Request, out var gameId))
         return Results.BadRequest("Missing or invalid gameId cookie");
 
-    var userId = EnsureUserIdCookie(http);
+    var user = http.Items["User"] as AuthenticatedUser;
+    if (user == null)
+        return Results.Unauthorized();
 
     using var socket = await http.WebSockets.AcceptWebSocketAsync();
-    await hub.HandleConnectionAsync(gameId, lobbyId, userId, socket, ct);
+    await hub.HandleConnectionAsync(gameId, lobbyId, user.SessionToken, socket, ct);
     return Results.Empty;
 }).WithTags("Lobbies").WithOpenApi(op =>
 {
     op.Summary = "Lobby Websocket";
-    op.Description = "WebSocket for lobby-specific updates. Uses server-generated 'userId' cookie.";
+    op.Description = "WebSocket for lobby-specific updates. Requires valid session token.";
     return op;
 });
 
@@ -504,7 +487,5 @@ app.Run();
 // dto records
 public record SetGameRequest(Guid GameId);
 public record CreateLobbyRequest(string OwnerDisplayName, int MaxPlayers, Dictionary<string, string>? Properties);
-public record JoinLobbyRequest(string DisplayName);
-public record ReadyRequest(string UserId, bool IsReady);
-public record AllReadyRequest(string UserId);
+public record ReadyRequest(bool IsReady);
 public record LobbyDataRequest(string Key, string Value);

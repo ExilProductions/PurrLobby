@@ -7,7 +7,7 @@ namespace PurrLobby.Services;
 
 public interface ILobbyEventHub
 {
-    Task HandleConnectionAsync(Guid gameId, string lobbyId, string userId, WebSocket socket, CancellationToken ct);
+    Task HandleConnectionAsync(Guid gameId, string lobbyId, string sessionToken, WebSocket socket, CancellationToken ct);
     Task BroadcastAsync(Guid gameId, string lobbyId, object evt, CancellationToken ct = default);
     Task CloseLobbyAsync(Guid gameId, string lobbyId, CancellationToken ct = default);
 }
@@ -21,6 +21,7 @@ public class LobbyEventHub : ILobbyEventHub
 
     private sealed class Subscriber
     {
+        public required string SessionToken { get; init; }
         public required string UserId { get; init; }
         public DateTime LastPongUtc { get; set; } = DateTime.UtcNow;
     }
@@ -39,6 +40,7 @@ public class LobbyEventHub : ILobbyEventHub
     };
 
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IAuthenticationService _authService;
 
     // ping settings
     private const int PingIntervalSeconds = 10;
@@ -47,16 +49,29 @@ public class LobbyEventHub : ILobbyEventHub
     // idle cleanup delay
     private const int IdleLobbyCleanupDelaySeconds = 45;
 
-    public LobbyEventHub(IServiceScopeFactory scopeFactory)
+    public LobbyEventHub(IServiceScopeFactory scopeFactory, IAuthenticationService authService)
     {
         _scopeFactory = scopeFactory;
+        _authService = authService;
     }
 
-    public async Task HandleConnectionAsync(Guid gameId, string lobbyId, string userId, WebSocket socket, CancellationToken ct)
+public async Task HandleConnectionAsync(Guid gameId, string lobbyId, string sessionToken, WebSocket socket, CancellationToken ct)
     {
+        // Validate session token before allowing connection
+        var validation = await _authService.ValidateTokenAsync(sessionToken, ct);
+        if (!validation.IsValid)
+        {
+            try
+            {
+                await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Invalid session token", ct);
+            }
+            catch { }
+            return;
+        }
+
         var key = new LobbyKey(gameId, lobbyId);
         var bag = _subscribers.GetOrAdd(key, _ => new());
-        var sub = new Subscriber { UserId = userId, LastPongUtc = DateTime.UtcNow };
+        var sub = new Subscriber { SessionToken = sessionToken, UserId = validation.UserId!, LastPongUtc = DateTime.UtcNow };
         bag.TryAdd(socket, sub);
 
         EnsurePingLoopStarted(key);
@@ -150,11 +165,11 @@ public class LobbyEventHub : ILobbyEventHub
                     {
                         bag.TryRemove(ws, out _);
                         try { if (ws.State == WebSocketState.Open) await ws.CloseAsync(WebSocketCloseStatus.PolicyViolation, "pong timeout", CancellationToken.None); } catch { }
-                        try
+try
                         {
                             using var scope = _scopeFactory.CreateScope();
                             var svc = scope.ServiceProvider.GetRequiredService<ILobbyService>();
-                            await svc.LeaveLobbyAsync(key.GameId, key.LobbyId, sub.UserId, CancellationToken.None);
+                            await svc.LeaveLobbyAsync(key.GameId, sub.SessionToken, CancellationToken.None);
                         }
                         catch { }
                     }
@@ -180,7 +195,7 @@ public class LobbyEventHub : ILobbyEventHub
             {
                 foreach (var m in members)
                 {
-                    try { await svc.LeaveLobbyAsync(key.GameId, key.LobbyId, m.Id, CancellationToken.None); } catch { }
+                    try { await svc.LeaveLobbyAsync(key.GameId, key.LobbyId, m.SessionToken, CancellationToken.None); } catch { }
                 }
             }
         }
@@ -284,7 +299,7 @@ public class LobbyEventHub : ILobbyEventHub
                 {
                     foreach (var m in members)
                     {
-                        try { await svc.LeaveLobbyAsync(key.GameId, key.LobbyId, m.Id, CancellationToken.None); } catch { }
+                        try { await svc.LeaveLobbyAsync(key.GameId, key.LobbyId, m.SessionToken, CancellationToken.None); } catch { }
                     }
                 }
 

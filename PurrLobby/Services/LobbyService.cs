@@ -6,18 +6,18 @@ namespace PurrLobby.Services;
 // lobby service core logic
 public interface ILobbyService
 {
-    Task<Lobby> CreateLobbyAsync(Guid gameId, string ownerUserId, string ownerDisplayName, int maxPlayers, Dictionary<string, string>? properties, CancellationToken ct = default);
-    Task<Lobby?> JoinLobbyAsync(Guid gameId, string lobbyId, string userId, string displayName, CancellationToken ct = default);
-    Task<bool> LeaveLobbyAsync(Guid gameId, string lobbyId, string userId, CancellationToken ct = default);
-    Task<bool> LeaveLobbyAsync(Guid gameId, string userId, CancellationToken ct = default);
+    Task<Lobby> CreateLobbyAsync(Guid gameId, string sessionToken, int maxPlayers, Dictionary<string, string>? properties, CancellationToken ct = default);
+    Task<Lobby?> JoinLobbyAsync(Guid gameId, string lobbyId, string sessionToken, CancellationToken ct = default);
+    Task<bool> LeaveLobbyAsync(Guid gameId, string lobbyId, string sessionToken, CancellationToken ct = default);
+    Task<bool> LeaveLobbyAsync(Guid gameId, string sessionToken, CancellationToken ct = default);
     Task<List<Lobby>> SearchLobbiesAsync(Guid gameId, int maxRoomsToFind, Dictionary<string, string>? filters, CancellationToken ct = default);
-    Task<bool> SetIsReadyAsync(Guid gameId, string lobbyId, string userId, bool isReady, CancellationToken ct = default);
-    Task<bool> SetLobbyDataAsync(Guid gameId, string lobbyId, string key, string value, CancellationToken ct = default);
+    Task<bool> SetIsReadyAsync(Guid gameId, string lobbyId, string sessionToken, bool isReady, CancellationToken ct = default);
+    Task<bool> SetLobbyDataAsync(Guid gameId, string lobbyId, string sessionToken, string key, string value, CancellationToken ct = default);
     Task<string?> GetLobbyDataAsync(Guid gameId, string lobbyId, string key, CancellationToken ct = default);
     Task<List<LobbyUser>> GetLobbyMembersAsync(Guid gameId, string lobbyId, CancellationToken ct = default);
-    Task<bool> SetAllReadyAsync(Guid gameId, string lobbyId, CancellationToken ct = default);
-    Task<bool> SetLobbyStartedAsync(Guid gameId, string lobbyId, CancellationToken ct = default);
-    Task<Lobby?> GetLobbyAsync(Guid gameId, string lobbyId, string currentUserId, CancellationToken ct = default);
+    
+    Task<bool> SetLobbyStartedAsync(Guid gameId, string lobbyId, string sessionToken, CancellationToken ct = default);
+    Task<Lobby?> GetLobbyAsync(Guid gameId, string lobbyId, string sessionToken, CancellationToken ct = default);
 
     // stats
     Task<int> GetGlobalPlayerCountAsync(CancellationToken ct = default);
@@ -31,6 +31,7 @@ internal class LobbyState
 {
     public required string Id { get; init; }
     public required Guid GameId { get; init; }
+    public required string OwnerSessionToken { get; set; }
     public required string OwnerUserId { get; set; }
     public int MaxPlayers { get; init; }
     public DateTime CreatedAtUtc { get; init; } = DateTime.UtcNow;
@@ -52,13 +53,15 @@ public class LobbyService : ILobbyService
     private const int MaxPropertyCount = 32;
 
     private readonly ConcurrentDictionary<string, LobbyState> _lobbies = new();
-    // user index key gameIdN:userId -> lobbyId
+    // user index key gameIdN:sessionToken -> lobbyId
     private readonly ConcurrentDictionary<string, string> _userLobbyIndexByGame = new();
     private readonly ILobbyEventHub _events;
+    private readonly IAuthenticationService _authService;
 
-    public LobbyService(ILobbyEventHub events)
+    public LobbyService(ILobbyEventHub events, IAuthenticationService authService)
     {
         _events = events;
+        _authService = authService;
     }
 
     private static string SanitizeString(string? s, int maxLen)
@@ -66,7 +69,7 @@ public class LobbyService : ILobbyService
 
     private static bool IsInvalidId(string? id) => string.IsNullOrWhiteSpace(id) || id.Length > 128;
 
-    private static Lobby Project(LobbyState s, string? currentUserId = null)
+    private async Task<Lobby> ProjectAsync(LobbyState s, string? currentSessionToken = null, CancellationToken ct = default)
     {
         var lobby = new Lobby
         {
@@ -75,21 +78,34 @@ public class LobbyService : ILobbyService
             LobbyId = s.Id,
             LobbyCode = s.LobbyCode,
             MaxPlayers = s.MaxPlayers,
-            IsOwner = currentUserId != null && string.Equals(s.OwnerUserId, currentUserId, StringComparison.Ordinal)
+            IsOwner = false
         };
+
+        if (currentSessionToken != null)
+        {
+            var validation = await _authService.ValidateTokenAsync(currentSessionToken, ct);
+            if (validation.IsValid && string.Equals(s.OwnerUserId, validation.UserId, StringComparison.Ordinal))
+            {
+                lobby.IsOwner = true;
+            }
+        }
+
         foreach (var kv in s.Properties)
             lobby.Properties[kv.Key] = kv.Value;
         foreach (var m in s.Members)
-            lobby.Members.Add(new LobbyUser { Id = m.Id, DisplayName = m.DisplayName, IsReady = m.IsReady });
+            lobby.Members.Add(new LobbyUser { SessionToken = m.SessionToken, UserId = m.UserId, DisplayName = m.DisplayName, IsReady = m.IsReady });
         return lobby;
     }
 
-    public async Task<Lobby> CreateLobbyAsync(Guid gameId, string ownerUserId, string ownerDisplayName, int maxPlayers, Dictionary<string, string>? properties, CancellationToken ct = default)
+    public async Task<Lobby> CreateLobbyAsync(Guid gameId, string sessionToken, int maxPlayers, Dictionary<string, string>? properties, CancellationToken ct = default)
     {
-        if (gameId == Guid.Empty || IsInvalidId(ownerUserId))
-            throw new ArgumentException("Invalid gameId or ownerUserId");
+        if (gameId == Guid.Empty || IsInvalidId(sessionToken))
+            throw new ArgumentException("Invalid gameId or sessionToken");
 
-        var display = SanitizeString(ownerDisplayName, DisplayNameMaxLength);
+        var validation = await _authService.ValidateTokenAsync(sessionToken, ct);
+        if (!validation.IsValid)
+            throw new UnauthorizedAccessException("Invalid session token");
+
         var clampedPlayers = Math.Clamp(maxPlayers, MinPlayers, MaxPlayersLimit);
 
         string GenerateLobbyCode()
@@ -112,7 +128,8 @@ public class LobbyService : ILobbyService
         {
             Id = Guid.NewGuid().ToString("N"),
             GameId = gameId,
-            OwnerUserId = ownerUserId,
+            OwnerSessionToken = sessionToken,
+            OwnerUserId = validation.UserId!,
             MaxPlayers = clampedPlayers,
             Name = properties != null && properties.TryGetValue("Name", out var n) ? SanitizeString(n, NameMaxLength) : string.Empty,
             LobbyCode = GenerateLobbyCode()
@@ -132,75 +149,100 @@ public class LobbyService : ILobbyService
 
         state.Members.Add(new LobbyUser
         {
-            Id = ownerUserId,
-            DisplayName = display,
+            SessionToken = sessionToken,
+            UserId = validation.UserId!,
+            DisplayName = validation.DisplayName!,
             IsReady = false
         });
 
         _lobbies[state.Id] = state;
-        _userLobbyIndexByGame[$"{gameId:N}:{ownerUserId}"] = state.Id;
+        _userLobbyIndexByGame[$"{gameId:N}:{sessionToken}"] = state.Id;
 
-        await _events.BroadcastAsync(gameId, state.Id, new { type = "lobby_created", lobbyId = state.Id, ownerUserId, ownerDisplayName = display, maxPlayers = state.MaxPlayers }, ct);
+        await _events.BroadcastAsync(gameId, state.Id, new { type = "lobby_created", lobbyId = state.Id, ownerUserId = validation.UserId, ownerDisplayName = validation.DisplayName, maxPlayers = state.MaxPlayers }, ct);
 
-        return Project(state, ownerUserId);
+        return await ProjectAsync(state, sessionToken, ct);
     }
 
-    public Task<Lobby?> JoinLobbyAsync(Guid gameId, string lobbyId, string userId, string displayName, CancellationToken ct = default)
+    public async Task<Lobby?> JoinLobbyAsync(Guid gameId, string lobbyId, string sessionToken, CancellationToken ct = default)
     {
-        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(userId))
-            return Task.FromResult<Lobby?>(null);
+        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(sessionToken))
+            return null;
+
+        var validation = await _authService.ValidateTokenAsync(sessionToken, ct);
+        if (!validation.IsValid)
+            return null;
 
         if (!_lobbies.TryGetValue(lobbyId, out var state))
-            return Task.FromResult<Lobby?>(null);
+            return null;
         if (state.GameId != gameId)
-            return Task.FromResult<Lobby?>(null);
+            return null;
 
         // prevent multi lobby join per game
-        if (_userLobbyIndexByGame.TryGetValue($"{gameId:N}:{userId}", out var existingLobbyId) && existingLobbyId != lobbyId)
-            return Task.FromResult<Lobby?>(null);
+        if (_userLobbyIndexByGame.TryGetValue($"{gameId:N}:{sessionToken}", out var existingLobbyId) && existingLobbyId != lobbyId)
+            return null;
 
-        var name = SanitizeString(displayName, DisplayNameMaxLength);
-
+        LobbyUser? existingMember = null;
+        bool canJoin = false;
+        
         lock (state)
         {
-            if (state.Started) return Task.FromResult<Lobby?>(null);
-            if (state.Members.Any(m => m.Id == userId))
-                return Task.FromResult<Lobby?>(Project(state, userId));
-            if (state.Members.Count >= state.MaxPlayers)
-                return Task.FromResult<Lobby?>(null);
-            state.Members.Add(new LobbyUser { Id = userId, DisplayName = name, IsReady = false });
+            if (state.Started) return null;
+            existingMember = state.Members.FirstOrDefault(m => m.SessionToken == sessionToken);
+            if (existingMember != null)
+                canJoin = true;
+            else if (state.Members.Count < state.MaxPlayers)
+            {
+                state.Members.Add(new LobbyUser { 
+                    SessionToken = sessionToken, 
+                    UserId = validation.UserId!, 
+                    DisplayName = validation.DisplayName!, 
+                    IsReady = false 
+                });
+                canJoin = true;
+            }
         }
-        _userLobbyIndexByGame[$"{gameId:N}:{userId}"] = lobbyId;
-        _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "member_joined", userId, displayName = name }, ct);
-        return Task.FromResult<Lobby?>(Project(state, userId));
+        
+        if (!canJoin) return null;
+        if (existingMember != null)
+            return await ProjectAsync(state, sessionToken, ct);
+        _userLobbyIndexByGame[$"{gameId:N}:{sessionToken}"] = lobbyId;
+        _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "member_joined", userId = validation.UserId, displayName = validation.DisplayName }, ct);
+        return await ProjectAsync(state, sessionToken, ct);
     }
 
-    public Task<bool> LeaveLobbyAsync(Guid gameId, string lobbyId, string userId, CancellationToken ct = default)
+    public async Task<bool> LeaveLobbyAsync(Guid gameId, string lobbyId, string sessionToken, CancellationToken ct = default)
     {
-        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(userId))
-            return Task.FromResult(false);
+        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(sessionToken))
+            return false;
+
+        var validation = await _authService.ValidateTokenAsync(sessionToken, ct);
+        if (!validation.IsValid)
+            return false;
 
         if (!_lobbies.TryGetValue(lobbyId, out var state))
-            return Task.FromResult(false);
+            return false;
         if (state.GameId != gameId)
-            return Task.FromResult(false);
+            return false;
         var removed = false;
         string? newOwner = null;
         lock (state)
         {
-            var idx = state.Members.FindIndex(m => m.Id == userId);
+            var idx = state.Members.FindIndex(m => m.SessionToken == sessionToken);
             if (idx >= 0)
             {
+                var member = state.Members[idx];
                 state.Members.RemoveAt(idx);
                 removed = true;
-                if (state.OwnerUserId == userId && state.Members.Count > 0)
+                if (state.OwnerUserId == member.UserId && state.Members.Count > 0)
                 {
-                    state.OwnerUserId = state.Members[0].Id; // promote first
-                    newOwner = state.OwnerUserId;
+                    var newOwnerMember = state.Members[0];
+                    state.OwnerUserId = newOwnerMember.UserId;
+                    state.OwnerSessionToken = newOwnerMember.SessionToken;
+                    newOwner = newOwnerMember.UserId;
                 }
             }
         }
-        _userLobbyIndexByGame.TryRemove($"{gameId:N}:{userId}", out _);
+        _userLobbyIndexByGame.TryRemove($"{gameId:N}:{sessionToken}", out _);
         if (removed)
         {
             // remove lobby if empty
@@ -212,28 +254,28 @@ public class LobbyService : ILobbyService
             }
             else
             {
-                _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "member_left", userId, newOwnerUserId = newOwner }, ct);
+                _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "member_left", userId = validation.UserId, newOwnerUserId = newOwner }, ct);
             }
         }
-        return Task.FromResult(removed);
+        return removed;
     }
 
-    public Task<bool> LeaveLobbyAsync(Guid gameId, string userId, CancellationToken ct = default)
+    public async Task<bool> LeaveLobbyAsync(Guid gameId, string sessionToken, CancellationToken ct = default)
     {
-        if (gameId == Guid.Empty || IsInvalidId(userId))
-            return Task.FromResult(false);
+        if (gameId == Guid.Empty || IsInvalidId(sessionToken))
+            return false;
 
-        if (_userLobbyIndexByGame.TryGetValue($"{gameId:N}:{userId}", out var lobbyId))
+        if (_userLobbyIndexByGame.TryGetValue($"{gameId:N}:{sessionToken}", out var lobbyId))
         {
-            return LeaveLobbyAsync(gameId, lobbyId, userId, ct);
+            return await LeaveLobbyAsync(gameId, lobbyId, sessionToken, ct);
         }
-        return Task.FromResult(false);
+        return false;
     }
 
-    public Task<List<Lobby>> SearchLobbiesAsync(Guid gameId, int maxRoomsToFind, Dictionary<string, string>? filters, CancellationToken ct = default)
+    public async Task<List<Lobby>> SearchLobbiesAsync(Guid gameId, int maxRoomsToFind, Dictionary<string, string>? filters, CancellationToken ct = default)
     {
         if (gameId == Guid.Empty)
-            return Task.FromResult(new List<Lobby>());
+            return new List<Lobby>();
 
         var take = Math.Clamp(maxRoomsToFind, 1, 100);
         IEnumerable<LobbyState> query = _lobbies.Values.Where(l => l.GameId == gameId && !l.Started && l.Members.Count < l.MaxPlayers);
@@ -247,55 +289,72 @@ public class LobbyService : ILobbyService
                 query = query.Where(l => l.Properties.TryGetValue(k, out var pv) && string.Equals(pv, v, StringComparison.OrdinalIgnoreCase));
             }
         }
-        var list = query.OrderByDescending(l => l.CreatedAtUtc).Take(take).Select(s => Project(s)).ToList();
-        return Task.FromResult(list);
+        var list = new List<Lobby>();
+        foreach (var state in query.OrderByDescending(l => l.CreatedAtUtc).Take(take))
+        {
+            list.Add(await ProjectAsync(state, null, ct));
+        }
+        return list;
     }
 
-    public Task<bool> SetIsReadyAsync(Guid gameId, string lobbyId, string userId, bool isReady, CancellationToken ct = default)
+    public async Task<bool> SetIsReadyAsync(Guid gameId, string lobbyId, string sessionToken, bool isReady, CancellationToken ct = default)
     {
-        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(userId))
-            return Task.FromResult(false);
+        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(sessionToken))
+            return false;
+
+        var validation = await _authService.ValidateTokenAsync(sessionToken, ct);
+        if (!validation.IsValid)
+            return false;
 
         if (!_lobbies.TryGetValue(lobbyId, out var state))
-            return Task.FromResult(false);
+            return false;
         if (state.GameId != gameId)
-            return Task.FromResult(false);
+            return false;
         lock (state)
         {
-            if (state.Started) return Task.FromResult(false);
-            var m = state.Members.FirstOrDefault(x => x.Id == userId);
-            if (m is null) return Task.FromResult(false);
+            if (state.Started) return false;
+            var m = state.Members.FirstOrDefault(x => x.SessionToken == sessionToken);
+            if (m is null) return false;
             m.IsReady = isReady;
         }
-        _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "member_ready", userId, isReady }, ct);
-        return Task.FromResult(true);
+        _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "member_ready", userId = validation.UserId, isReady }, ct);
+        return true;
     }
 
-    public Task<bool> SetLobbyDataAsync(Guid gameId, string lobbyId, string key, string value, CancellationToken ct = default)
+    public async Task<bool> SetLobbyDataAsync(Guid gameId, string lobbyId, string sessionToken, string key, string value, CancellationToken ct = default)
     {
-        if (gameId == Guid.Empty || IsInvalidId(lobbyId))
-            return Task.FromResult(false);
+        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(sessionToken))
+            return false;
         if (string.IsNullOrWhiteSpace(key))
-            return Task.FromResult(false);
+            return false;
+
+        var validation = await _authService.ValidateTokenAsync(sessionToken, ct);
+        if (!validation.IsValid)
+            return false;
 
         if (!_lobbies.TryGetValue(lobbyId, out var state))
-            return Task.FromResult(false);
+            return false;
         if (state.GameId != gameId)
-            return Task.FromResult(false);
+            return false;
+        
+        // Only owner can set lobby data
+        if (state.OwnerUserId != validation.UserId)
+            return false;
+            
         lock (state)
         {
             var k = SanitizeString(key, PropertyKeyMaxLength);
-            if (string.IsNullOrEmpty(k)) return Task.FromResult(false);
+            if (string.IsNullOrEmpty(k)) return false;
             var v = SanitizeString(value, PropertyValueMaxLength);
             if (!state.Properties.ContainsKey(k) && state.Properties.Count >= MaxPropertyCount)
-                return Task.FromResult(false);
+                return false;
 
             state.Properties[k] = v;
             if (string.Equals(k, "Name", StringComparison.OrdinalIgnoreCase))
                 state.Name = SanitizeString(v, NameMaxLength);
         }
         _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "lobby_data", key, value }, ct);
-        return Task.FromResult(true);
+        return true;
     }
 
     public Task<string?> GetLobbyDataAsync(Guid gameId, string lobbyId, string key, CancellationToken ct = default)
@@ -323,56 +382,59 @@ public class LobbyService : ILobbyService
         {
             return Task.FromResult(state.Members.Select(m => new LobbyUser
             {
-                Id = m.Id,
+                SessionToken = m.SessionToken,
+                UserId = m.UserId,
                 DisplayName = m.DisplayName,
                 IsReady = m.IsReady
             }).ToList());
         }
     }
 
-    public Task<bool> SetAllReadyAsync(Guid gameId, string lobbyId, CancellationToken ct = default)
+    
+
+    public async Task<bool> SetLobbyStartedAsync(Guid gameId, string lobbyId, string sessionToken, CancellationToken ct = default)
     {
-        if (gameId == Guid.Empty || IsInvalidId(lobbyId))
-            return Task.FromResult(false);
+        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(sessionToken))
+            return false;
+
+        var validation = await _authService.ValidateTokenAsync(sessionToken, ct);
+        if (!validation.IsValid)
+            return false;
 
         if (!_lobbies.TryGetValue(lobbyId, out var state))
-            return Task.FromResult(false);
+            return false;
         if (state.GameId != gameId)
-            return Task.FromResult(false);
-        lock (state)
-        {
-            if (state.Started) return Task.FromResult(false);
-            foreach (var m in state.Members)
-                m.IsReady = true;
-        }
-        _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "all_ready" }, ct);
-        return Task.FromResult(true);
-    }
-
-    public Task<bool> SetLobbyStartedAsync(Guid gameId, string lobbyId, CancellationToken ct = default)
-    {
-        if (gameId == Guid.Empty || IsInvalidId(lobbyId))
-            return Task.FromResult(false);
-
-        if (!_lobbies.TryGetValue(lobbyId, out var state))
-            return Task.FromResult(false);
-        if (state.GameId != gameId)
-            return Task.FromResult(false);
-        if (state.Started) return Task.FromResult(false);
+            return false;
+        
+        // Only owner can start lobby
+        if (state.OwnerUserId != validation.UserId)
+            return false;
+            
+        if (state.Started) return false;
         state.Started = true;
         _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "lobby_started" }, ct);
-        return Task.FromResult(true);
+        return true;
     }
 
-    public Task<Lobby?> GetLobbyAsync(Guid gameId, string lobbyId, string currentUserId, CancellationToken ct = default)
+    public async Task<Lobby?> GetLobbyAsync(Guid gameId, string lobbyId, string sessionToken, CancellationToken ct = default)
     {
-        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(currentUserId))
-            return Task.FromResult<Lobby?>(null);
+        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(sessionToken))
+            return null;
+        
+        var validation = await _authService.ValidateTokenAsync(sessionToken, ct);
+        if (!validation.IsValid)
+            return null;
+            
         if (!_lobbies.TryGetValue(lobbyId, out var state))
-            return Task.FromResult<Lobby?>(null);
+            return null;
         if (state.GameId != gameId)
-            return Task.FromResult<Lobby?>(null);
-        return Task.FromResult<Lobby?>(Project(state, currentUserId));
+            return null;
+        
+        // Check if user is member of this lobby
+        if (!state.Members.Any(m => m.SessionToken == sessionToken))
+            return null;
+            
+        return await ProjectAsync(state, sessionToken, ct);
     }
 
     public Task<int> GetGlobalPlayerCountAsync(CancellationToken ct = default)
@@ -411,7 +473,7 @@ public class LobbyService : ILobbyService
                 foreach (var m in state.Members)
                 {
                     // unique per user id in game
-                    players[m.Id] = new LobbyUser { Id = m.Id, DisplayName = m.DisplayName, IsReady = m.IsReady };
+                    players[m.UserId] = new LobbyUser { SessionToken = m.SessionToken, UserId = m.UserId, DisplayName = m.DisplayName, IsReady = m.IsReady };
                 }
             }
         }

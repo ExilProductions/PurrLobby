@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -19,14 +19,12 @@
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.8" />
   </ItemGroup>
 
-  <!-- Copy static web assets to output on build so running the exe from bin works -->
   <ItemGroup>
     <Content Update="wwwroot\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 
-  <!-- Copy certificates to output directory -->
   <ItemGroup>
     <Content Include="Certs\*.pem">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
