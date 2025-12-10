@@ -586,31 +586,44 @@ app.Map("/ws/lobbies/{lobbyId}", async (HttpContext http, string lobbyId, ILobby
     using var socket = await http.WebSockets.AcceptWebSocketAsync();
     await hub.HandleConnectionAsync(gameId, lobbyId, token, socket, ct);
     return Results.Empty;
-}).WithTags("Lobbies").WithOpenApi(op =>
+});
+
+// websocket documentation endpoint
+app.MapGet("/ws/docs", () => Results.Ok(new {
+    endpoint = "/ws/lobbies/{lobbyId}",
+    protocol = "WebSocket",
+    description = "Real-time lobby updates WebSocket connection",
+    authentication = new {
+        methods = new[] {
+            "Authorization: Bearer <token>",
+            "Query parameter: ?token=<token>"
+        },
+        requirements = new[] {
+            "Valid session token required",
+            "Valid gameId cookie required", 
+            "User must be lobby member"
+        }
+    },
+    events = new {
+        lobby_created = "New lobby created",
+        member_joined = "User joined the lobby",
+        member_left = "User left the lobby", 
+        member_ready = "User ready state changed",
+        everyone_ready = "Owner set all members as ready (includes affectedMembers array)",
+        lobby_data = "Lobby property updated",
+        lobby_started = "Lobby started by owner",
+        lobby_empty = "Lobby closed due to no members",
+        lobby_deleted = "Lobby forcefully closed",
+        ping = "Server heartbeat (respond with 'pong')"
+    },
+    exampleConnection = "new WebSocket('wss://purrlobby.exil.dev/ws/lobbies/your-lobby-id?token=your-session-token')"
+}))
+.WithTags("WebSocket")
+.WithOpenApi(op =>
 {
-    op.Summary = "Lobby Websocket";
-    op.Description = @"WebSocket for real-time lobby-specific updates. Requires valid session token provided via Authorization header or 'token' query parameter.
-
-Authentication: 
-- Bearer token in Authorization header: 'Authorization: Bearer <token>'
-- Or token as query parameter: '?token=<token>'
-
-WebSocket Events:
-- lobby_created: New lobby created
-- member_joined: User joined the lobby  
-- member_left: User left the lobby
-- member_ready: User ready state changed
-- everyone_ready: Owner set all members as ready (includes affectedMembers array)
-- lobby_data: Lobby property updated
-- lobby_started: Lobby started by owner
-- lobby_empty: Lobby closed due to no members
-- lobby_deleted: Lobby forcefully closed
-- ping: Server heartbeat (respond with 'pong')
-
-Connection Requirements:
-- Valid gameId cookie must be set
-- Valid session token required
-- User must be member of the lobby";
+    op.Summary = "WebSocket API documentation";
+    op.Description = "Returns documentation for the lobby WebSocket endpoint including events and authentication.";
+    op.Security.Clear();
     return op;
 });
 
