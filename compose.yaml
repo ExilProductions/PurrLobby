@@ -1,54 +1,62 @@
-# Comments are provided throughout this file to help you get started.
-# If you need more help, visit the Docker Compose reference guide at
-# https://docs.docker.com/go/compose-spec-reference/
+version: "3.9"
 
-# Here the instructions define your application as a service called "server".
-# This service is built from the Dockerfile in the current directory.
-# You can add other services your application may depend on here, such as a
-# database or a cache. For examples, see the Awesome Compose repository:
-# https://github.com/docker/awesome-compose
 services:
+  traefik:
+    image: "traefik:v3.4"
+    container_name: "traefik"
+    restart: unless-stopped
+    networks:
+      - proxy
+    command:
+      - "--api.insecure=false"
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=proxy"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.websecure.address=:443"
+      - "--entryPoints.websecure.http.tls=true"
+      - "--entryPoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entryPoints.web.http.redirections.entryPoint.scheme=https"
+
+      # Let's Encrypt ACME
+      - "--certificatesresolvers.le.acme.email=YOUR_EMAIL@example.com" # replace with your email
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./letsencrypt:/letsencrypt"
+      - "./dynamic:/etc/traefik/dynamic:ro"
+    labels:
+      # Dashboard
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`dashboard.purrlobby.exil.dev`)"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.tls=true"
+      - "traefik.http.routers.dashboard.tls.certresolver=le"
+
   server:
     build:
       context: .
       target: final
+    container_name: "purrlobby"
+    restart: unless-stopped
+    networks:
+      - proxy
     labels:
       - "traefik.enable=true"
-      - "traefik.tcp.routers.purrlobby.entrypoints=websecure"
-      - "traefik.tcp.routers.purrlobby.rule=HostSNI(`purrlobby.exil.dev`)"
-      - "traefik.tcp.services.purrlobby.loadbalancer.server.port=443"
+      - "traefik.http.routers.purrlobby.entrypoints=websecure"
+      - "traefik.http.routers.purrlobby.rule=Host(`purrlobby.exil.dev`)"
+      - "traefik.http.routers.purrlobby.tls=true"
+      - "traefik.http.routers.purrlobby.tls.certresolver=le"
+      - "traefik.http.services.purrlobby.loadbalancer.server.port=80"
 
-
-# The commented out section below is an example of how to define a PostgreSQL
-# database that your application can use. `depends_on` tells Docker Compose to
-# start the database before your application. The `db-data` volume persists the
-# database data between container restarts. The `db-password` secret is used
-# to set the database password. You must create `db/password.txt` and add
-# a password of your choosing to it before running `docker compose up`.
-#     depends_on:
-#       db:
-#         condition: service_healthy
-#   db:
-#     image: postgres
-#     restart: always
-#     user: postgres
-#     secrets:
-#       - db-password
-#     volumes:
-#       - db-data:/var/lib/postgresql/data
-#     environment:
-#       - POSTGRES_DB=example
-#       - POSTGRES_PASSWORD_FILE=/run/secrets/db-password
-#     expose:
-#       - 5432
-#     healthcheck:
-#       test: [ "CMD", "pg_isready" ]
-#       interval: 10s
-#       timeout: 5s
-#       retries: 5
-# volumes:
-#   db-data:
-# secrets:
-#   db-password:
-#     file: db/password.txt
-
+networks:
+  proxy:
+    name: proxy
