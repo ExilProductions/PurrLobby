@@ -13,7 +13,8 @@ public class AuthenticationMiddleware
     {
         "/auth/create",
         "/health",
-        "/metrics"
+        "/metrics",
+        "/ws/"
     };
 
     public AuthenticationMiddleware(RequestDelegate next, IAuthenticationService authService)

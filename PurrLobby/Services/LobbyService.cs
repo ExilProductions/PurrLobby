@@ -12,6 +12,7 @@ public interface ILobbyService
     Task<bool> LeaveLobbyAsync(Guid gameId, string sessionToken, CancellationToken ct = default);
     Task<List<Lobby>> SearchLobbiesAsync(Guid gameId, int maxRoomsToFind, Dictionary<string, string>? filters, CancellationToken ct = default);
     Task<bool> SetIsReadyAsync(Guid gameId, string lobbyId, string sessionToken, bool isReady, CancellationToken ct = default);
+    Task<bool> SetEveryoneReadyAsync(Guid gameId, string lobbyId, string sessionToken, CancellationToken ct = default);
     Task<bool> SetLobbyDataAsync(Guid gameId, string lobbyId, string sessionToken, string key, string value, CancellationToken ct = default);
     Task<string?> GetLobbyDataAsync(Guid gameId, string lobbyId, string key, CancellationToken ct = default);
     Task<List<LobbyUser>> GetLobbyMembersAsync(Guid gameId, string lobbyId, CancellationToken ct = default);
@@ -318,6 +319,42 @@ public class LobbyService : ILobbyService
             m.IsReady = isReady;
         }
         _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "member_ready", userId = validation.UserId, isReady }, ct);
+        return true;
+    }
+
+    public async Task<bool> SetEveryoneReadyAsync(Guid gameId, string lobbyId, string sessionToken, CancellationToken ct = default)
+    {
+        if (gameId == Guid.Empty || IsInvalidId(lobbyId) || IsInvalidId(sessionToken))
+            return false;
+
+        var validation = await _authService.ValidateTokenAsync(sessionToken, ct);
+        if (!validation.IsValid)
+            return false;
+
+        if (!_lobbies.TryGetValue(lobbyId, out var state))
+            return false;
+        if (state.GameId != gameId)
+            return false;
+        
+        // Only owner can set everyone ready
+        if (state.OwnerUserId != validation.UserId)
+            return false;
+            
+        List<LobbyUser> membersToUpdate;
+        lock (state)
+        {
+            if (state.Started) return false;
+            membersToUpdate = state.Members.Where(m => !m.IsReady).ToList();
+            foreach (var m in membersToUpdate)
+            {
+                m.IsReady = true;
+            }
+        }
+
+        if (membersToUpdate.Count > 0)
+        {
+            _ = _events.BroadcastAsync(gameId, lobbyId, new { type = "everyone_ready", userId = validation.UserId, affectedMembers = membersToUpdate.Select(m => new { m.UserId, m.DisplayName }) }, ct);
+        }
         return true;
     }
 

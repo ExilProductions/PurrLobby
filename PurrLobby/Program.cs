@@ -266,6 +266,20 @@ static bool TryGetGameIdFromCookie(HttpRequest request, out Guid gameId)
     return Guid.TryParse(v, out gameId);
 }
 
+// WebSocket token extraction helper
+static string? ExtractTokenForWebSocket(HttpContext context)
+{
+    // Try Authorization header first
+    var authHeader = context.Request.Headers.Authorization.FirstOrDefault();
+    if (!string.IsNullOrEmpty(authHeader) && authHeader.StartsWith("Bearer "))
+    {
+        return authHeader["Bearer ".Length..];
+    }
+
+    // Fall back to query parameter
+    return context.Request.Query["token"].FirstOrDefault();
+}
+
 
 
 // create lobby
@@ -500,6 +514,32 @@ app.MapPost("/lobbies/{lobbyId}/ready", async (HttpContext http, ILobbyService s
 .Produces(StatusCodes.Status400BadRequest)
 .ProducesProblem(StatusCodes.Status400BadRequest);
 
+// set everyone ready
+app.MapPost("/lobbies/{lobbyId}/ready-all", async (HttpContext http, ILobbyService service, string lobbyId, CancellationToken ct) =>
+{
+    if (!TryGetGameIdFromCookie(http.Request, out var gameId))
+        return Results.BadRequest("Missing or invalid gameId cookie");
+        
+    var user = http.Items["User"] as AuthenticatedUser;
+    if (user == null)
+        return Results.Unauthorized();
+        
+    var ok = await service.SetEveryoneReadyAsync(gameId, lobbyId, user.SessionToken, ct);
+    return ok ? Results.Ok() : Results.NotFound();
+})
+.WithTags("Lobbies")
+.WithOpenApi(op =>
+{
+    op.Summary = "Set all members ready";
+    op.Description = "Owner only. Sets all lobby members as ready. Broadcastes an everyone_ready event with affected members list.";
+    return op;
+})
+.Produces(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status403Forbidden)
+.Produces(StatusCodes.Status404NotFound)
+.Produces(StatusCodes.Status400BadRequest)
+.ProducesProblem(StatusCodes.Status400BadRequest);
+
 // start lobby
 app.MapPost("/lobbies/{lobbyId}/start", async (HttpContext http, ILobbyService service, string lobbyId, CancellationToken ct) =>
 {
@@ -526,7 +566,7 @@ app.MapPost("/lobbies/{lobbyId}/start", async (HttpContext http, ILobbyService s
 .Produces(StatusCodes.Status400BadRequest);
 
 // lobby websocket
-app.Map("/ws/lobbies/{lobbyId}", async (HttpContext http, string lobbyId, ILobbyEventHub hub, CancellationToken ct) =>
+app.Map("/ws/lobbies/{lobbyId}", async (HttpContext http, string lobbyId, ILobbyEventHub hub, IAuthenticationService authService, CancellationToken ct) =>
 {
     if (!http.WebSockets.IsWebSocketRequest)
         return Results.BadRequest("Expected WebSocket");
@@ -534,17 +574,43 @@ app.Map("/ws/lobbies/{lobbyId}", async (HttpContext http, string lobbyId, ILobby
     if (!TryGetGameIdFromCookie(http.Request, out var gameId))
         return Results.BadRequest("Missing or invalid gameId cookie");
 
-    var user = http.Items["User"] as AuthenticatedUser;
-    if (user == null)
+    // Extract token from Authorization header or query parameter for WebSocket
+    var token = ExtractTokenForWebSocket(http);
+    if (string.IsNullOrEmpty(token))
+        return Results.Unauthorized();
+
+    var validation = await authService.ValidateTokenAsync(token, ct);
+    if (!validation.IsValid)
         return Results.Unauthorized();
 
     using var socket = await http.WebSockets.AcceptWebSocketAsync();
-    await hub.HandleConnectionAsync(gameId, lobbyId, user.SessionToken, socket, ct);
+    await hub.HandleConnectionAsync(gameId, lobbyId, token, socket, ct);
     return Results.Empty;
 }).WithTags("Lobbies").WithOpenApi(op =>
 {
     op.Summary = "Lobby Websocket";
-    op.Description = "WebSocket for lobby-specific updates. Requires valid session token.";
+    op.Description = @"WebSocket for real-time lobby-specific updates. Requires valid session token provided via Authorization header or 'token' query parameter.
+
+Authentication: 
+- Bearer token in Authorization header: 'Authorization: Bearer <token>'
+- Or token as query parameter: '?token=<token>'
+
+WebSocket Events:
+- lobby_created: New lobby created
+- member_joined: User joined the lobby  
+- member_left: User left the lobby
+- member_ready: User ready state changed
+- everyone_ready: Owner set all members as ready (includes affectedMembers array)
+- lobby_data: Lobby property updated
+- lobby_started: Lobby started by owner
+- lobby_empty: Lobby closed due to no members
+- lobby_deleted: Lobby forcefully closed
+- ping: Server heartbeat (respond with 'pong')
+
+Connection Requirements:
+- Valid gameId cookie must be set
+- Valid session token required
+- User must be member of the lobby";
     return op;
 });
 
