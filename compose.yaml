@@ -14,10 +14,9 @@ services:
       target: final
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.purrlobby.rule=Host(`purrlobby.exil.dev`)"
-      - "traefik.http.routers.purrlobby.entrypoints=websecure"
-      - "traefik.http.routers.purrlobby.tls.certresolver=letsencrypt"
-      - "traefik.http.services.purrlobby.loadbalancer.server.port=8080" # internal port your app listens on
+      - "traefik.tcp.routers.purrlobby.entrypoints=websecure"
+      - "traefik.tcp.routers.purrlobby.rule=HostSNI(`purrlobby.exil.dev`)"
+      - "traefik.tcp.services.purrlobby.loadbalancer.server.port=443"
 
 
 # The commented out section below is an example of how to define a PostgreSQL
