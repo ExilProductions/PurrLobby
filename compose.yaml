@@ -40,6 +40,8 @@ services:
       - "traefik.http.routers.dashboard.service=api@internal"
       - "traefik.http.routers.dashboard.tls=true"
       - "traefik.http.routers.dashboard.tls.certresolver=le"
+      - "traefik.http.middlewares.dashboard-auth.basicauth.users=admin:$$apr1$$XHYvA6xP$$nol8TiAhcTXeMqcJjtDuv1"
+      - "traefik.http.routers.dashboard.middlewares=dashboard-auth"
 
   server:
     build:
